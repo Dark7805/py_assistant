@@ -83,8 +83,9 @@ def speak(text):
 
 # Function to open applications in a separate thread (non-blocking)
 def open_application_in_background(command):
-    thread = threading.Thread(target=app_launcher.open_application, args=(command,))
+    thread = threading.Thread(target=app_launcher.handle_application, args=(command,))
     thread.start()
+
 
 
 # Main function to choose the recognition method based on internet connection

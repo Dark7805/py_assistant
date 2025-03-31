@@ -39,8 +39,8 @@ def close_application(app_name):
 
 # Function to handle opening or closing an application based on the command
 def handle_application(command):
-    if "start" in command:
-        app_name = command.replace("start", "").strip()
+    if "start" in  command or "open" in command:
+        app_name = command.replace("start", "").replace("open","").strip()
         if app_name:
             start_application(app_name)
         else:
