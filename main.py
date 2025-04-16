@@ -5,160 +5,214 @@ import json
 import socket
 import wikipedia
 import app_launcher
-import pyttsx3
 import threading
 import queue
-import requests
-from greeting import initialize_greeting
+import time
+from greeting import initialize_greeting, openingApp
+from text_to_speech import speak  # Centralized TTS import
+from fuzzywuzzy import fuzz
 
-# Initialize the TTS engine
-engine = pyttsx3.init()
-speech_queue = queue.Queue()
+# Queues for async handling
+app_result_queue = queue.Queue()
 
-# Function to check internet connection
 def is_connected():
+    """Check internet connectivity"""
     try:
         socket.create_connection(("8.8.8.8", 53), timeout=5)
         return True
     except OSError:
         return False
 
-# Function for Google Speech Recognition (Online)
 def recognize_google_online():
+    """Online voice recognition using Google API"""
     recognizer = sr.Recognizer()
     with sr.Microphone() as source:
-        print("Listening...")
-        recognizer.adjust_for_ambient_noise(source)
-        audio = recognizer.listen(source)
-    
-    try:
-        text = recognizer.recognize_google(audio)
-        print("You said:", text)
-        return text.lower()
-    except sr.UnknownValueError:
-        speak("Hmm, I didn't catch that. Could you repeat?")
-        return ""
-    except sr.RequestError:
-        speak("Oops! I can't connect to Google right now. Let's try something else.")
-        return ""
+        print("Listening (Online)...")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
+        try:
+            audio = recognizer.listen(source, timeout=5, phrase_time_limit=8)
+            return recognizer.recognize_google(audio).lower()
+        except (sr.WaitTimeoutError, sr.UnknownValueError, sr.RequestError):
+            return ""
 
-# Function for Vosk Speech Recognition (Offline)
 def recognize_vosk_offline():
+    """Offline voice recognition using Vosk"""
     model = Model(r"D:\\Code\\Python_Project\\vosk-model-small-en-us-0.15")
     recognizer = KaldiRecognizer(model, 16000)
-    p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8192)
+    mic = pyaudio.PyAudio()
+    stream = mic.open(format=pyaudio.paInt16, channels=1, rate=16000,
+                     input=True, frames_per_buffer=8192)
     stream.start_stream()
 
     print("Listening (Offline)...")
     while True:
-        data = stream.read(4000, exception_on_overflow=False)
+        data = stream.read(4096, exception_on_overflow=False)
         if recognizer.AcceptWaveform(data):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").lower()
-            print("You said:", text)
+            text = json.loads(recognizer.Result()).get("text", "").lower()
+            stream.stop_stream()
+            stream.close()
+            mic.terminate()
             return text
 
-# Function to search Wikipedia
-def search_wikipedia(query):
-    try:
-        print(f"Searching Wikipedia for: {query}")
-        summary = wikipedia.summary(query, sentences=2)
-        print("Wikipedia says:", summary)
-        return summary
-    except wikipedia.exceptions.DisambiguationError:
-        return "That topic has multiple meanings. Could you specify a bit more?"
-    except wikipedia.exceptions.HTTPError:
-        return "I'm having trouble reaching Wikipedia right now. Try again later."
-    except Exception:
-        return "Sorry, I couldn't find anything on that topic."
-
-# Function to get specific smart responses from Wolfram Alpha
-def get_smart_response(command):
-    api_url = "http://api.wolframalpha.com/v1/result?appid=YOUR_APP_ID&i=" + command
-    try:
-        response = requests.get(api_url)
-        if response.status_code == 200:
-            return response.text
-        return "I'm sorry, I couldn't find a direct answer to that."
-    except:
-        return "I'm having trouble retrieving data. Try again later."
-
-# Function to open or close applications in the background
-def open_or_close_application(command):
-    print(f"Attempting to handle app command: {command}")  # Debugging line
-    thread = threading.Thread(target=app_launcher.handle_application, args=(command,))
-    thread.start()
-
-# Function for TTS (Text-to-Speech)
-def speak(text):
-    print("Speaking:", text)
-    engine.say(text)
-    engine.runAndWait()
-
-# Main function to recognize speech
 def recognize_speech():
-    if is_connected():
-        return recognize_google_online()
-    else:
-        return recognize_vosk_offline()
+    """Choose between online and offline speech recognition"""
+    return recognize_google_online() if is_connected() else recognize_vosk_offline()
 
-# Function to stop the program
-def stop_program():
-    global running
-    running = False 
+def search_wikipedia(query):
+    """Search Wikipedia and return summary"""
+    try:
+        speak("Let me look that up for you...")
+        wikipedia.set_lang("en")
+        results = wikipedia.search(query)
+        if not results:
+            return "I couldn't find anything on that topic."
+        summary = wikipedia.summary(results[0], sentences=2)
+        return f"According to Wikipedia: {summary}"
+    except wikipedia.DisambiguationError:
+        return "There are multiple results. Please be more specific."
+    except wikipedia.PageError:
+        return "Page not found."
+    except Exception as e:
+        print(f"Wikipedia error: {e}")
+        return "An error occurred while searching."
 
-# Main Program
-def run_app():
-    initialize_greeting()
-    speak("Hello! How may I assist you today?")
+def handle_app_operation(command):
+    """Trigger app_launcher to open/close apps"""
+    try:
+        action = "open" if "open" in command else "close"
+        app_name = command.replace("open", "").replace("close", "").strip()
+
+        if not app_name:
+            return "Please specify an application name."
+
+        result = app_launcher.handle_application(command)
+        return result or f"Successfully {action}ed {app_name}"
+    except Exception as e:
+        print(f"App operation error: {e}")
+        return f"Sorry, I couldn't {action} the application."
+
+def open_or_close_application(command):
+    """Launch application logic in a separate thread"""
     
+    openingApp()
+
+    def app_worker(q, cmd):
+        q.put(handle_app_operation(cmd))
+
+    operation_thread = threading.Thread(target=app_worker, args=(app_result_queue, command), daemon=True)
+    operation_thread.start()
+
+    result = app_result_queue.get()
+    operation_thread.join()
+   
+def open_application(command):
+    """Handles opening application in a separate thread"""
+    openingApp()  # Only used for opening
+    def app_worker(q, cmd):
+        q.put(handle_app_operation(cmd))
+
+    operation_thread = threading.Thread(target=app_worker, args=(app_result_queue, command), daemon=True)
+    operation_thread.start()
+
+    result = app_result_queue.get()
+    operation_thread.join()
+    speak(result)
+
+
+def close_application(command):
+    """Handles closing application in a separate thread"""
+    def app_worker(q, cmd):
+        q.put(handle_app_operation(cmd))
+
+    operation_thread = threading.Thread(target=app_worker, args=(app_result_queue, command), daemon=True)
+    operation_thread.start()
+
+    result = app_result_queue.get()
+    operation_thread.join()
+    speak(result)
+
+
+def fuzzy_match(command, phrases):
+    """Match command using fuzzy logic"""
+    for phrase in phrases:
+        if fuzz.partial_ratio(command, phrase) > 80:  # Match threshold
+            return True
+    return False
+
+def handle_greetings(command):
+    """Handle common greeting variations using fuzzy matching."""
+    greetings = ["how are you", "how r u", "how's it going", "how are you doing", "hey", "hi", "hello"]
+    if fuzzy_match(command, greetings):
+        speak("I'm doing great, thank you! How about you?")
+        return True
+    return False
+
+def handle_jokes(command):
+    """Handle jokes command."""
+    if "joke" in command:
+        speak("Why don't scientists trust atoms? Because they make up everything!")
+        return True
+    return False
+
+def handle_thank_you(command):
+    """Handle thank you response."""
+    if "thank you" in command:
+        speak("You're very welcome! Let me know if there's anything else.")
+        return True
+    return False
+
+def run_app():
+    """Main assistant loop"""
+    initialize_greeting()
+    time.sleep(1.0)
+    speak("Hello! I'm ready to help. How can I assist you today?")
+
     while True:
         command = recognize_speech()
-
-        if "stop" in command:
-            speak("Alright, shutting down. Talk to you later!")
-            stop_program()
-            break 
-        
-        # Handle Smart Responses
-        if "highest score of" in command:
-            entity = command.replace("highest score of", "").strip()
-            response = get_smart_response(f"highest score of {entity}")
-            speak(response)
+        if not command:
             continue
-        
-        # Search Wikipedia for specific queries
+
+        command = command.lower().strip()
+        print(f"Command received: {command}")
+
+        if any(word in command for word in ["stop", "exit", "quit", "shutdown"]):
+            speak("Goodbye! Have a great day.")
+            break
+
+        # Handle specific commands using functions
+        if handle_greetings(command):
+            continue
+
+        if handle_jokes(command):
+            continue
+
+        if handle_thank_you(command):
+            continue
+
         if "search wikipedia" in command:
             query = command.replace("search wikipedia", "").strip()
-            if query:
-                result = search_wikipedia(query)
-                speak(result)
-            else:
-                speak("What would you like to search for?")
-        
-        elif "who is" in command or "what is" in command:
+            speak(search_wikipedia(query) if query else "What should I search for?")
+
+        elif any(cmd in command for cmd in ["who is", "what is"]):
             query = command.replace("who is", "").replace("what is", "").strip()
-            if query:
-                result = search_wikipedia(query)
-                speak(result)
-            else:
-                speak("Can you specify the topic a bit more?")
-        
-        elif "how are you" in command:
-            speak("I'm feeling fantastic! How about you?")
-        
-        elif "tell me a joke" in command:
-            speak("Why did the computer catch a cold? Because it left its Windows open!")
-        
-        elif "thank you" in command:
-            speak("You're very welcome! Always happy to help.")
-        
-        elif "open" in command or "close" in command:
-            open_or_close_application(command)
-        
-        else:
-            speak("Got it! Let me take care of that for you.")
+            speak(search_wikipedia(query) if query else "Please specify what you'd like to know.")
+
+        elif "open" in command:
+            open_application(command)
+
+        elif "close" in command:
+            close_application(command)
+
             
+
+        else:
+            speak("I'm not sure I understand. Could you try rephrasing that?")
+
 if __name__ == "__main__":
-    run_app()
+    try:
+        run_app()
+    except KeyboardInterrupt:
+        speak("Shutting down.")
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        speak("An error occurred. Restarting might help.")
